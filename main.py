@@ -1,57 +1,90 @@
 import time
-import customtkinter
-import pyautogui
+import threading
+import platform
+import os
 
-customtkinter.set_appearance_mode("dark")
-customtkinter.set_default_color_theme("blue")
+# Versuche 'mouse' zu nutzen (globaler Hook + Klick)
+try:
+    import mouse as mouse_lib
+except Exception:
+    mouse_lib = None
 
+# Fallback: pynput (oft zuverlässiger zum Hören unter Linux/macOS)
+try:
+    from pynput.mouse import Controller, Button, Listener
+    pynput_available = True
+except Exception:
+    pynput_available = False
 
-class App(customtkinter.CTk):
-    def __init__(self):
-        super().__init__()
+# Steuerflags
+pause_event = threading.Event()   # gesetzt = läuft, nicht gesetzt = pausiert
+pause_event.set()
+stop_event = threading.Event()
 
-        self.title("Auto Clicker")
-        self.geometry("500x300")
+def safe_click():
+    """Führe einen Linksklick aus, ohne die Hauptschleife zu blockieren."""
+    def _do_click():
+        # Erst 'mouse' versuchen
+        if mouse_lib:
+            try:
+                mouse_lib.click("left")
+                return
+            except Exception:
+                pass
+        # Fallback: pynput
+        if pynput_available:
+            try:
+                ctl = Controller()
+                ctl.press(Button.left)
+                ctl.release(Button.left)
+                return
+            except Exception:
+                pass
+        # Wenn beides nicht klappt, einfach still weitermachen
+    threading.Thread(target=_do_click, daemon=True).start()
 
-        self.label_input_clicks = customtkinter.CTkLabel(self, text="Enter amount of clicks:")
-        self.label_input_clicks.grid(row=0, column=0, padx=5, pady=5)
-        self.input_clicks = customtkinter.CTkEntry(self, placeholder_text="0")
-        self.input_clicks.grid(row=0, column=1, padx=5, pady=5)
+def toggle_pause(_=None):
+    if pause_event.is_set():
+        pause_event.clear()
+        print("Gestoppt", flush=True)
+    else:
+        pause_event.set()
+        print("Gestartet", flush=True)
 
-        self.label_input_delay = customtkinter.CTkLabel(self, text="Enter amount of delay between clicks:")
-        self.label_input_delay.grid(row=1, column=0, padx=5, pady=5)
-        self.input_delay = customtkinter.CTkEntry(self, placeholder_text="0")
-        self.input_delay.grid(row=1, column=1, padx=5, pady=5)
+def worker_loop():
+    n = 0
+    while not stop_event.is_set():
+        pause_event.wait()  # blockiert, solange pausiert
+        print(f"Clicked {n} times", flush=True)
+        safe_click()
+        n += 1
+        time.sleep(0.25)
 
-        self.label_countdown = customtkinter.CTkLabel(self, text="")
-        self.label_countdown.grid(row=3, column=0, padx=5, pady=5, columnspan=2)
+if __name__ == "__main__":
+    # Rechtsklick abhören (mouse bevorzugt, sonst pynput)
+    listener = None
+    if mouse_lib:
+        mouse_lib.on_right_click(toggle_pause)
+    elif pynput_available:
+        def on_click(x, y, button, pressed):
+            if pressed and button == Button.right:
+                toggle_pause()
+        listener = Listener(on_click=on_click)
+        listener.daemon = True
+        listener.start()
+    else:
+        print("Hinweis: Weder 'mouse' noch 'pynput' verfügbar – Toggle per Rechtsklick deaktiviert.", flush=True)
 
-        self.label_countdown_info = customtkinter.CTkLabel(self, text="after starting the program you have 3 seconds "
-                                                                      "to place the mouse")
-        self.label_countdown_info.grid(row=4, column=0, padx=5, pady=5, columnspan=2)
-        self.start_button = customtkinter.CTkButton(self, text="Start", command=self.countdown)
-        self.start_button.grid(row=2, column=0, padx=5, pady=5, columnspan=2)
+    # Hinweis für Wayland (häufige Ursache für blockierende/verbietene Klick-Simulation)
+    if platform.system() == "Linux" and os.environ.get("XDG_SESSION_TYPE") == "wayland":
+        print("Achtung: Unter Wayland sind synthetische Klicks oft eingeschränkt. "
+              "Alternativen: Xorg-Session, 'ydotool' oder geeignete Rechte/Udev-Regeln.", flush=True)
 
-    def countdown(self, count=3) -> None:
-        if count > 0:
-            self.label_countdown.configure(text=f"{count}...")
-            self.after(1000, self.countdown, count - 1)
-        else:
-            self.start_clicker()
-
-    def start_clicker(self) -> None:
-        i = 0
-        clicks = int(self.input_clicks.get())
-        delay = float(self.input_delay.get())
-        while i < clicks:
-            pyautogui.click()
-            print("clicked")
-            i = i + 1
-            time.sleep(delay)
-
-
-if __name__ == '__main__':
-    app = App()
-    app.mainloop()
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    t = threading.Thread(target=worker_loop, daemon=True)
+    t.start()
+    try:
+        while True:
+            time.sleep(10)  # Hauptthread am Leben halten
+    except KeyboardInterrupt:
+        stop_event.set()
+        print("Beendet.", flush=True)
